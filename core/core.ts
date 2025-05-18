@@ -26,6 +26,10 @@ import { GlobalContext } from "./util/GlobalContext";
 import historyManager from "./util/history";
 import { editConfigFile, migrateV1DevDataFiles } from "./util/paths";
 import { Telemetry } from "./util/posthog";
+import {
+  isProcessBackgrounded,
+  markProcessAsBackgrounded,
+} from "./util/processTerminalBackgroundStates";
 import { getSymbolsForManyFiles } from "./util/treeSitter";
 import { TTS } from "./util/tts";
 
@@ -35,6 +39,7 @@ import {
   IdeSettings,
   ModelDescription,
   RangeInFile,
+  type ContextItem,
   type ContextItemId,
   type IDE,
   type IndexingProgressUpdate,
@@ -48,41 +53,60 @@ import {
   setupQuickstartConfig,
 } from "./config/onboarding";
 import { createNewWorkspaceBlockFile } from "./config/workspace/workspaceBlocks";
-import { MCPManagerSingleton } from "./context/mcp";
+import { MCPManagerSingleton } from "./context/mcp/MCPManagerSingleton";
 import { streamDiffLines } from "./edit/streamDiffLines";
 import { shouldIgnore } from "./indexing/shouldIgnore";
 import { walkDirCache } from "./indexing/walkDir";
+import { LLMError } from "./llm";
 import { LLMLogger } from "./llm/logger";
 import { llmStreamChat } from "./llm/streamChat";
 import type { FromCoreProtocol, ToCoreProtocol } from "./protocol";
 import type { IMessenger, Message } from "./protocol/messenger";
 
+// This function is used for jetbrains inline edit and apply
 async function* streamDiffLinesGenerator(
   configHandler: ConfigHandler,
   abortedMessageIds: Set<string>,
   msg: Message<ToCoreProtocol["streamDiffLines"][0]>,
 ): AsyncGenerator<DiffLine> {
-  const data = msg.data;
+  const {
+    highlighted,
+    prefix,
+    suffix,
+    input,
+    language,
+    modelTitle,
+    includeRulesInSystemMessage,
+  } = msg.data;
 
   const { config } = await configHandler.loadConfig();
   if (!config) {
     throw new Error("Failed to load config");
   }
 
-  const llm = config.selectedModelByRole.chat;
+  // Title can be an edit, chat, or apply model
+  // Fall back to chat
+  const llm =
+    config.modelsByRole.edit.find((m) => m.title === modelTitle) ??
+    config.modelsByRole.apply.find((m) => m.title === modelTitle) ??
+    config.modelsByRole.chat.find((m) => m.title === modelTitle) ??
+    config.selectedModelByRole.chat;
 
   if (!llm) {
-    throw new Error("No chat model selected");
+    throw new Error("No model selected");
   }
 
+  // rules included for edit, NOT apply
+  const rules = includeRulesInSystemMessage ? config.rules : undefined;
+
   for await (const diffLine of streamDiffLines({
-    highlighted: data.highlighted,
-    prefix: data.prefix,
-    suffix: data.suffix,
+    highlighted,
+    prefix,
+    suffix,
     llm,
-    rules: config.rules,
-    input: data.input,
-    language: data.language,
+    rulesToInclude: rules,
+    input,
+    language,
     onlyOneInsertion: false,
     overridePrompt: undefined,
   })) {
@@ -172,8 +196,6 @@ export class Core {
           this.configHandler.currentProfile?.profileDescription.id || null,
         organizations: this.configHandler.getSerializedOrgs(),
         selectedOrgId: this.configHandler.currentOrg.id,
-        usingContinueForTeams: (await ideSettingsPromise)
-          .enableControlServerBeta,
       });
 
       // update additional submenu context providers registered via VSCode API
@@ -254,6 +276,7 @@ export class Core {
     this.registerMessageHandlers(ideSettingsPromise);
   }
 
+  /* eslint-disable max-lines-per-function */
   private registerMessageHandlers(ideSettingsPromise: Promise<IdeSettings>) {
     const on = this.messenger.on.bind(this.messenger);
 
@@ -277,7 +300,6 @@ export class Core {
       }
     });
 
-    // Special
     on("abort", (msg) => {
       this.abortedMessageIds.add(msg.messageId);
     });
@@ -306,12 +328,14 @@ export class Core {
       historyManager.save(msg.data);
     });
 
-    // Dev data
+    on("history/clear", (msg) => {
+      historyManager.clearAll();
+    });
+
     on("devdata/log", async (msg) => {
       void DataLogger.getInstance().logDevData(msg.data);
     });
 
-    // Edit config
     on("config/addModel", (msg) => {
       const model = msg.data.model;
       addModel(model, msg.data.role);
@@ -343,8 +367,8 @@ export class Core {
       return await this.configHandler.getSerializedConfig();
     });
 
-    on("config/ideSettingsUpdate", (msg) => {
-      this.configHandler.updateIdeSettings(msg.data);
+    on("config/ideSettingsUpdate", async (msg) => {
+      await this.configHandler.updateIdeSettings(msg.data);
     });
 
     on("config/refreshProfiles", async (msg) => {
@@ -383,7 +407,7 @@ export class Core {
     });
 
     on("mcp/reloadServer", async (msg) => {
-      MCPManagerSingleton.getInstance().refreshConnection(msg.data.id);
+      await MCPManagerSingleton.getInstance().refreshConnection(msg.data.id);
     });
     // Context providers
     on("context/addDocs", async (msg) => {
@@ -404,15 +428,20 @@ export class Core {
         return [];
       }
 
-      const items = await config.contextProviders
-        ?.find((provider) => provider.description.title === msg.data.title)
-        ?.loadSubmenuItems({
-          config,
-          ide: this.ide,
-          fetch: (url, init) =>
-            fetchwithRequestOptions(url, init, config.requestOptions),
-        });
-      return items || [];
+      try {
+        const items = await config.contextProviders
+          ?.find((provider) => provider.description.title === msg.data.title)
+          ?.loadSubmenuItems({
+            config,
+            ide: this.ide,
+            fetch: (url, init) =>
+              fetchwithRequestOptions(url, init, config.requestOptions),
+          });
+        return items || [];
+      } catch (e) {
+        console.error(e);
+        return [];
+      }
     });
 
     on("context/getContextItems", this.getContextItems.bind(this));
@@ -429,8 +458,6 @@ export class Core {
           this.configHandler.currentProfile?.profileDescription.id ?? null,
         organizations: this.configHandler.getSerializedOrgs(),
         selectedOrgId: this.configHandler.currentOrg.id,
-        usingContinueForTeams: (await ideSettingsPromise)
-          .enableControlServerBeta,
       };
     });
 
@@ -468,7 +495,7 @@ export class Core {
       );
       return completion;
     });
-    on("llm/listModels", this.handleListModels);
+    on("llm/listModels", this.handleListModels.bind(this));
 
     // Provide messenger to utils so they can interact with GUI + state
     TTS.messenger = this.messenger;
@@ -509,9 +536,9 @@ export class Core {
       streamDiffLinesGenerator(this.configHandler, this.abortedMessageIds, msg),
     );
 
-    on("completeOnboarding", this.handleCompleteOnboarding);
+    on("completeOnboarding", this.handleCompleteOnboarding.bind(this));
 
-    on("addAutocompleteModel", this.handleAddAutocompleteModel);
+    on("addAutocompleteModel", this.handleAddAutocompleteModel.bind(this));
 
     on("stats/getTokensPerDay", async (msg) => {
       const rows = await DevDataSqliteDb.getTokensPerDay();
@@ -552,7 +579,7 @@ export class Core {
     });
 
     // File changes - TODO - remove remaining logic for these from IDEs where possible
-    on("files/changed", this.handleFilesChanged);
+    on("files/changed", this.handleFilesChanged.bind(this));
     const refreshIfNotIgnored = async (uris: string[]) => {
       const toRefresh: string[] = [];
       for (const uri of uris) {
@@ -630,17 +657,24 @@ export class Core {
     });
 
     on("didChangeSelectedProfile", async (msg) => {
-      await this.configHandler.setSelectedProfileId(msg.data.id);
+      if (msg.data.id) {
+        await this.configHandler.setSelectedProfileId(msg.data.id);
+      }
     });
 
     on("didChangeSelectedOrg", async (msg) => {
-      await this.configHandler.setSelectedOrgId(
-        msg.data.id,
-        msg.data.profileId,
-      );
+      if (msg.data.id) {
+        await this.configHandler.setSelectedOrgId(
+          msg.data.id,
+          msg.data.profileId || undefined,
+        );
+      }
     });
 
     on("didChangeControlPlaneSessionInfo", async (msg) => {
+      this.messenger.send("sessionUpdate", {
+        sessionInfo: msg.data.sessionInfo,
+      });
       await this.configHandler.updateControlPlaneSessionInfo(
         msg.data.sessionInfo,
       );
@@ -656,7 +690,7 @@ export class Core {
 
     on("didChangeActiveTextEditor", async ({ data: { filepath } }) => {
       try {
-        const ignore = shouldIgnore(filepath, this.ide);
+        const ignore = await shouldIgnore(filepath, this.ide);
         if (!ignore) {
           recentlyEditedFilesCache.set(filepath, filepath);
         }
@@ -667,7 +701,7 @@ export class Core {
       }
     });
 
-    on("tools/call", async ({ data: { toolCall, selectedModelTitle } }) => {
+    on("tools/call", async ({ data: { toolCall } }) => {
       const { config } = await this.configHandler.loadConfig();
       if (!config) {
         throw new Error("Config not loaded");
@@ -685,47 +719,55 @@ export class Core {
         throw new Error("No chat model selected");
       }
 
-      const contextItems = await callTool(
+      // Define a callback for streaming output updates
+      const onPartialOutput = (params: {
+        toolCallId: string;
+        contextItems: ContextItem[];
+      }) => {
+        this.messenger.send("toolCallPartialOutput", params);
+      };
+
+      return await callTool(tool, toolCall.function.arguments, {
+        ide: this.ide,
+        llm: config.selectedModelByRole.chat,
+        fetch: (url, init) =>
+          fetchwithRequestOptions(url, init, config.requestOptions),
         tool,
-        JSON.parse(toolCall.function.arguments || "{}"),
-        {
-          ide: this.ide,
-          llm: config.selectedModelByRole.chat,
-          fetch: (url, init) =>
-            fetchwithRequestOptions(url, init, config.requestOptions),
-          tool,
-        },
-      );
-
-      if (tool.faviconUrl) {
-        contextItems.forEach((item) => {
-          item.icon = tool.faviconUrl;
-        });
-      }
-
-      return { contextItems };
+        toolCallId: toolCall.id,
+        onPartialOutput,
+      });
     });
 
-    on("isItemTooBig", async ({ data: { item, selectedModelTitle } }) => {
+    on("isItemTooBig", async ({ data: { item } }) => {
       return this.isItemTooBig(item);
     });
+
+    // Process state handlers
+    on("process/markAsBackgrounded", async ({ data: { toolCallId } }) => {
+      markProcessAsBackgrounded(toolCallId);
+    });
+
+    on(
+      "process/isBackgrounded",
+      async ({ data: { toolCallId }, messageId }) => {
+        const isBackgrounded = isProcessBackgrounded(toolCallId);
+        return isBackgrounded; // Return true to indicate the message was handled successfully
+      },
+    );
   }
 
   private async isItemTooBig(item: ContextItemWithId) {
     const { config } = await this.configHandler.loadConfig();
-
     if (!config) {
       return false;
     }
 
-    const llm = (await this.configHandler.loadConfig()).config
-      ?.selectedModelByRole.chat;
-
+    const llm = config?.selectedModelByRole.chat;
     if (!llm) {
       throw new Error("No chat model selected");
     }
 
-    const tokens = countTokens(item.content);
+    const tokens = countTokens(item.content, llm.model);
 
     if (tokens > llm.contextLength - llm.completionOptions!.maxTokens!) {
       return true;
@@ -797,7 +839,8 @@ export class Core {
         if (
           uri.endsWith(".continuerc.json") ||
           uri.endsWith(".prompt") ||
-          uri.endsWith(SYSTEM_PROMPT_DOT_FILE)
+          uri.endsWith(SYSTEM_PROMPT_DOT_FILE) ||
+          (uri.includes(".continue") && uri.endsWith(".yaml"))
         ) {
           await this.configHandler.reloadConfig();
         } else if (
@@ -891,7 +934,6 @@ export class Core {
       query: string;
       fullInput: string;
       selectedCode: RangeInFile[];
-      selectedModelTitle: string;
     }>,
   ) => {
     const { config } = await this.configHandler.loadConfig();
@@ -1009,25 +1051,22 @@ export class Core {
       this.indexingCancellationController.abort();
     }
     this.indexingCancellationController = new AbortController();
-    for await (const update of (await this.codebaseIndexerPromise).refreshDirs(
-      paths,
-      this.indexingCancellationController.signal,
-    )) {
-      let updateToSend = { ...update };
-      // TODO reconsider this status overwrite?
-      // original goal was to not concern users with edge noncritical errors
-      if (update.status === "failed") {
-        updateToSend.status = "done";
-        updateToSend.desc = "Indexing complete";
-        updateToSend.progress = 1.0;
-      }
+    try {
+      for await (const update of (
+        await this.codebaseIndexerPromise
+      ).refreshDirs(paths, this.indexingCancellationController.signal)) {
+        let updateToSend = { ...update };
 
-      void this.messenger.request("indexProgress", updateToSend);
-      this.codebaseIndexingState = updateToSend;
+        void this.messenger.request("indexProgress", updateToSend);
+        this.codebaseIndexingState = updateToSend;
 
-      if (update.status === "failed") {
-        void this.sendIndexingErrorTelemetry(update);
+        if (update.status === "failed") {
+          void this.sendIndexingErrorTelemetry(update);
+        }
       }
+    } catch (e: any) {
+      console.log(`Failed refreshing codebase index directories : ${e}`);
+      this.handleIndexingError(e);
     }
 
     this.messenger.send("refreshSubmenuItems", {
@@ -1045,22 +1084,22 @@ export class Core {
       return;
     }
     this.indexingCancellationController = new AbortController();
-    for await (const update of (await this.codebaseIndexerPromise).refreshFiles(
-      files,
-    )) {
-      let updateToSend = { ...update };
-      if (update.status === "failed") {
-        updateToSend.status = "done";
-        updateToSend.desc = "Indexing complete";
-        updateToSend.progress = 1.0;
-      }
+    try {
+      for await (const update of (
+        await this.codebaseIndexerPromise
+      ).refreshFiles(files)) {
+        let updateToSend = { ...update };
 
-      void this.messenger.request("indexProgress", updateToSend);
-      this.codebaseIndexingState = updateToSend;
+        void this.messenger.request("indexProgress", updateToSend);
+        this.codebaseIndexingState = updateToSend;
 
-      if (update.status === "failed") {
-        void this.sendIndexingErrorTelemetry(update);
+        if (update.status === "failed") {
+          void this.sendIndexingErrorTelemetry(update);
+        }
       }
+    } catch (e: any) {
+      console.log(`Failed refreshing codebase index files : ${e}`);
+      this.handleIndexingError(e);
     }
 
     this.messenger.send("refreshSubmenuItems", {
@@ -1070,4 +1109,19 @@ export class Core {
   }
 
   // private
+  handleIndexingError(e: any) {
+    if (e instanceof LLMError) {
+      // Need to report this specific error to the IDE for special handling
+      void this.messenger.request("reportError", e);
+    }
+    // broadcast indexing error
+    let updateToSend: IndexingProgressUpdate = {
+      progress: 0,
+      status: "failed",
+      desc: e.message,
+    };
+    void this.messenger.request("indexProgress", updateToSend);
+    this.codebaseIndexingState = updateToSend;
+    void this.sendIndexingErrorTelemetry(updateToSend);
+  }
 }

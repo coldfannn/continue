@@ -226,7 +226,12 @@ describe("LLM", () => {
       apiKey: process.env.MISTRAL_API_KEY,
       model: "codestral-latest",
     }),
-    { testFim: true, skip: false },
+    {
+      testFim: true,
+      skip: false,
+      testToolCall: true,
+      timeout: 60000,
+    },
   );
   testLLM(
     new Azure({

@@ -1,4 +1,8 @@
-import { DataDestination, ModelRole } from "@continuedev/config-yaml";
+import {
+  DataDestination,
+  ModelRole,
+  PromptTemplates,
+} from "@continuedev/config-yaml";
 import Parser from "web-tree-sitter";
 import { LLMConfigurationStatuses } from "./llm/constants";
 import { GetGhTokenArgs } from "./protocol/ide";
@@ -153,6 +157,8 @@ export interface ModelInstaller {
     signal: AbortSignal,
     progressReporter?: (task: string, increment: number, total: number) => void,
   ): Promise<any>;
+
+  isInstallingModel(modelName: string): Promise<boolean>;
 }
 
 export type ContextProviderType = "normal" | "query" | "submenu";
@@ -191,15 +197,14 @@ export interface CustomContextProvider {
   description?: string;
   renderInlineAs?: string;
   type?: ContextProviderType;
+  loadSubmenuItems?: (
+    args: LoadSubmenuItemsArgs,
+  ) => Promise<ContextSubmenuItem[]>;
 
   getContextItems(
     query: string,
     extras: ContextProviderExtras,
   ): Promise<ContextItem[]>;
-
-  loadSubmenuItems?: (
-    args: LoadSubmenuItemsArgs,
-  ) => Promise<ContextSubmenuItem[]>;
 }
 
 export interface ContextSubmenuItem {
@@ -238,10 +243,6 @@ export interface IContextProvider {
   ): Promise<ContextItem[]>;
 
   loadSubmenuItems(args: LoadSubmenuItemsArgs): Promise<ContextSubmenuItem[]>;
-}
-
-export interface Checkpoint {
-  [filepath: string]: string;
 }
 
 export interface Session {
@@ -395,6 +396,7 @@ export interface ContextItem {
   icon?: string;
   uri?: ContextItemUri;
   hidden?: boolean;
+  status?: string;
 }
 
 export interface ContextItemWithId extends ContextItem {
@@ -427,6 +429,7 @@ export type ToolStatus =
   | "generating"
   | "generated"
   | "calling"
+  | "errored"
   | "done"
   | "canceled";
 
@@ -454,9 +457,8 @@ export interface ChatHistoryItem {
   promptLogs?: PromptLog[];
   toolCallState?: ToolCallState;
   isGatheringContext?: boolean;
-  checkpoint?: Checkpoint;
-  isBeforeCheckpoint?: boolean;
   reasoning?: Reasoning;
+  appliedRules?: RuleWithSource[];
 }
 
 export interface LLMFullCompletionOptions extends BaseCompletionOptions {
@@ -559,13 +561,14 @@ export interface LLMOptions {
 
   title?: string;
   uniqueId?: string;
+  baseAgentSystemMessage?: string;
   baseChatSystemMessage?: string;
   contextLength?: number;
   maxStopWords?: number;
   completionOptions?: CompletionOptions;
   requestOptions?: RequestOptions;
   template?: TemplateType;
-  promptTemplates?: Record<string, PromptTemplate>;
+  promptTemplates?: Partial<Record<keyof PromptTemplates, PromptTemplate>>;
   templateMessages?: (messages: ChatMessage[]) => string;
   logger?: ILLMLogger;
   llmRequestHook?: (model: string, prompt: string) => any;
@@ -699,7 +702,6 @@ export interface IdeSettings {
   remoteConfigServerUrl: string | undefined;
   remoteConfigSyncPeriod: number;
   userToken: string;
-  enableControlServerBeta: boolean;
   continueTestEnvironment: "none" | "production" | "staging" | "local";
   pauseCodebaseIndexOnStart: boolean;
 }
@@ -908,7 +910,8 @@ export type TemplateType =
   | "llava"
   | "gemma"
   | "granite"
-  | "llama3";
+  | "llama3"
+  | "codestral";
 
 export interface RequestOptions {
   timeout?: number;
@@ -965,6 +968,11 @@ export interface ToolExtras {
   llm: ILLM;
   fetch: FetchFunction;
   tool: Tool;
+  toolCallId?: string;
+  onPartialOutput?: (params: {
+    toolCallId: string;
+    contextItems: ContextItem[];
+  }) => void;
 }
 
 export interface Tool {
@@ -981,6 +989,7 @@ export interface Tool {
   isCurrently?: string;
   hasAlready?: string;
   readonly: boolean;
+  isInstant?: boolean;
   uri?: string;
   faviconUrl?: string;
   group: string;
@@ -1006,6 +1015,7 @@ export interface BaseCompletionOptions {
   numThreads?: number;
   useMmap?: boolean;
   keepAlive?: number;
+  numGpu?: number;
   raw?: boolean;
   stream?: boolean;
   prediction?: Prediction;
@@ -1013,6 +1023,7 @@ export interface BaseCompletionOptions {
   toolChoice?: ToolChoice;
   reasoning?: boolean;
   reasoningBudgetTokens?: number;
+  promptCaching?: boolean;
 }
 
 export interface ModelCapability {
@@ -1036,6 +1047,7 @@ export interface ModelDescription {
   maxStopWords?: number;
   template?: TemplateType;
   completionOptions?: BaseCompletionOptions;
+  baseAgentSystemMessage?: string;
   baseChatSystemMessage?: string;
   requestOptions?: RequestOptions;
   promptTemplates?: { [key: string]: string };
@@ -1079,6 +1091,7 @@ export interface TabAutocompleteOptions {
   disable: boolean;
   maxPromptTokens: number;
   debounceDelay: number;
+  modelTimeout: number;
   maxSuffixPercentage: number;
   prefixPercentage: number;
   transform?: boolean;
@@ -1104,16 +1117,19 @@ export interface StdioOptions {
   command: string;
   args: string[];
   env?: Record<string, string>;
+  requestOptions?: RequestOptions;
 }
 
 export interface WebSocketOptions {
   type: "websocket";
   url: string;
+  requestOptions?: RequestOptions;
 }
 
 export interface SSEOptions {
   type: "sse";
   url: string;
+  requestOptions?: RequestOptions;
 }
 
 export type TransportOptions = StdioOptions | WebSocketOptions | SSEOptions;
@@ -1151,6 +1167,7 @@ export interface MCPResource {
   description?: string;
   mimeType?: string;
 }
+
 export interface MCPTool {
   name: string;
   description?: string;
@@ -1195,16 +1212,11 @@ export interface ExperimentalModelRoles {
 export interface ExperimentalMCPOptions {
   transport: TransportOptions;
   faviconUrl?: string;
+  timeout?: number;
 }
 
-export type EditStatus =
-  | "not-started"
-  | "streaming"
-  | "accepting"
-  | "accepting:full-diff"
-  | "done";
-
 export type ApplyStateStatus =
+  | "not-started" // Apply state created but not necessarily streaming
   | "streaming" // Changes are being applied to the file
   | "done" // All changes have been applied, awaiting user to accept/reject
   | "closed"; // All changes have been applied. Note that for new files, we immediately set the status to "closed"
@@ -1218,6 +1230,27 @@ export interface ApplyState {
   toolCallId?: string;
 }
 
+export interface StreamDiffLinesPayload {
+  prefix: string;
+  highlighted: string;
+  suffix: string;
+  input: string;
+  language: string | undefined;
+  modelTitle: string | undefined;
+  includeRulesInSystemMessage: boolean;
+}
+
+export interface HighlightedCodePayload {
+  rangeInFileWithContents: RangeInFileWithContents;
+  prompt?: string;
+  shouldRun?: boolean;
+}
+
+export interface AcceptOrRejectDiffPayload {
+  filepath: string;
+  streamId?: string;
+}
+
 export interface RangeInFileWithContents {
   filepath: string;
   range: {
@@ -1227,7 +1260,7 @@ export interface RangeInFileWithContents {
   contents: string;
 }
 
-export type CodeToEdit = RangeInFileWithContents | FileWithContents;
+export type SetCodeToEditPayload = RangeInFileWithContents | FileWithContents;
 
 /**
  * Represents the configuration for a quick action in the Code Lens.
@@ -1483,18 +1516,23 @@ export type PackageDocsResult = {
 export interface TerminalOptions {
   reuseTerminal?: boolean;
   terminalName?: string;
+  waitForCompletion?: boolean;
 }
+
+export type RuleSource =
+  | "default-chat"
+  | "default-agent"
+  | "model-chat-options"
+  | "model-agent-options"
+  | "rules-block"
+  | "json-systemMessage"
+  | ".continuerules";
 
 export interface RuleWithSource {
   name?: string;
   slug?: string;
-  source:
-    | "default"
-    | "model-chat-options"
-    | "rules-block"
-    | "json-systemMessage"
-    | ".continuerules";
-  if?: string;
+  source: RuleSource;
+  globs?: string | string[];
   rule: string;
   description?: string;
   ruleFile?: string;

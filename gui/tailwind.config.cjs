@@ -25,6 +25,9 @@ module.exports = {
       animation: {
         "spin-slow": "spin 6s linear infinite",
       },
+      borderRadius: {
+        default: "5px",
+      },
       colors: {
         lightgray: "#999998",
         "vsc-input-background": "var(--vscode-input-background, rgb(45 45 45))",
@@ -40,6 +43,7 @@ module.exports = {
         // TODO make it all non-IDE-specific naming
         "find-match-selected":
           "var(--vscode-editor-findMatchHighlightBackground, rgba(255, 223, 0))",
+        "table-odd-rows":"var(--vscode-tree-tableOddRowsBackground, #1bbe84)",
         "list-active": "var(--vscode-list-activeSelectionBackground, #1bbe84)",
         "list-active-foreground":
           "var(--vscode-quickInputList-focusForeground, var(--vscode-editor-foreground))",

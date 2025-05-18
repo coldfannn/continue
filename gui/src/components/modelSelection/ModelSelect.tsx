@@ -12,7 +12,6 @@ import { useAuth } from "../../context/Auth";
 import { IdeMessengerContext } from "../../context/IdeMessenger";
 import AddModelForm from "../../forms/AddModelForm";
 import { useAppDispatch, useAppSelector } from "../../redux/hooks";
-import { selectSelectedChatModel } from "../../redux/slices/configSlice";
 import { setDialogMessage, setShowDialog } from "../../redux/slices/uiSlice";
 import { updateSelectedModelByRole } from "../../redux/thunks";
 import { getMetaKeyLabel, isMetaEquivalentKeyPressed } from "../../util";
@@ -120,10 +119,23 @@ function ModelOption({
 
 function ModelSelect() {
   const dispatch = useAppDispatch();
-  const selectedChatModel = useAppSelector(selectSelectedChatModel);
-  const allChatModels = useAppSelector(
-    (state) => state.config.config.modelsByRole.chat,
-  );
+
+  const mode = useAppSelector((store) => store.session.mode);
+  const config = useAppSelector((state) => state.config.config);
+
+  let selectedModel = null;
+  let allModels = null;
+  if (mode === "edit") {
+    allModels = config.modelsByRole.edit;
+    selectedModel = config.selectedModelByRole.edit;
+  }
+  if (!selectedModel) {
+    selectedModel = config.selectedModelByRole.chat;
+  }
+  if (!allModels || allModels.length === 0) {
+    allModels = config.modelsByRole.chat;
+  }
+
   const buttonRef = useRef<HTMLButtonElement>(null);
   const [options, setOptions] = useState<Option[]>([]);
   const [sortedOptions, setSortedOptions] = useState<Option[]>([]);
@@ -131,8 +143,9 @@ function ModelSelect() {
 
   // Sort so that options without an API key are at the end
   useEffect(() => {
-    const enabledOptions = options.filter((option) => option.apiKey !== "");
-    const disabledOptions = options.filter((option) => option.apiKey === "");
+    const alphaSort = options.sort((a, b) => a.title.localeCompare(b.title));
+    const enabledOptions = alphaSort.filter((option) => option.apiKey !== "");
+    const disabledOptions = alphaSort.filter((option) => option.apiKey === "");
 
     const sorted = [...enabledOptions, ...disabledOptions];
 
@@ -141,34 +154,36 @@ function ModelSelect() {
 
   useEffect(() => {
     setOptions(
-      allChatModels
-        .filter((m) => !m.roles || m.roles.includes("chat"))
-        .map((model) => {
-          return {
-            value: model.title,
-            title: modelSelectTitle(model),
-            apiKey: model.apiKey,
-          };
-        }),
+      allModels.map((model) => {
+        return {
+          value: model.title,
+          title: modelSelectTitle(model),
+          apiKey: model.apiKey,
+        };
+      }),
     );
-  }, [allChatModels]);
+  }, [config]);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "'" && isMetaEquivalentKeyPressed(event as any)) {
+      if (
+        event.key === "'" &&
+        isMetaEquivalentKeyPressed(event as any) &&
+        !event.shiftKey // To prevent collisions w/ assistant toggle logic
+      ) {
         if (!selectedProfile) {
           return;
         }
 
         const direction = event.shiftKey ? -1 : 1;
         const currentIndex = options.findIndex(
-          (option) => option.value === selectedChatModel?.title,
+          (option) => option.value === selectedModel?.title,
         );
         let nextIndex = (currentIndex + 1 * direction) % options.length;
         if (nextIndex < 0) nextIndex = options.length - 1;
         const newModelTitle = options[nextIndex].value;
 
-        dispatch(
+        void dispatch(
           updateSelectedModelByRole({
             selectedProfile,
             role: "chat",
@@ -182,7 +197,7 @@ function ModelSelect() {
     return () => {
       window.removeEventListener("keydown", handleKeyDown);
     };
-  }, [options, selectedChatModel]);
+  }, [options, selectedModel]);
 
   function onClickAddModel(e: MouseEvent) {
     e.stopPropagation();
@@ -207,11 +222,11 @@ function ModelSelect() {
   return (
     <Listbox
       onChange={async (val: string) => {
-        if (val === selectedChatModel?.title) return;
-        dispatch(
+        if (val === selectedModel?.title) return;
+        void dispatch(
           updateSelectedModelByRole({
             selectedProfile,
-            role: "chat",
+            role: mode === "edit" ? "edit" : "chat",
             modelTitle: val,
           }),
         );
@@ -224,7 +239,7 @@ function ModelSelect() {
           className="h-[18px] gap-1 border-none text-gray-400"
         >
           <span className="line-clamp-1 break-all hover:brightness-110">
-            {modelSelectTitle(selectedChatModel) || "Select model"}
+            {modelSelectTitle(selectedModel) || "Select model"}
           </span>
           <ChevronDownIcon
             className="h-2 w-2 flex-shrink-0 hover:brightness-110"
@@ -239,7 +254,7 @@ function ModelSelect() {
                 idx={idx}
                 key={idx}
                 showMissingApiKeyMsg={option.apiKey === ""}
-                isSelected={option.value === selectedChatModel?.title}
+                isSelected={option.value === selectedModel?.title}
               />
             ))}
           </div>

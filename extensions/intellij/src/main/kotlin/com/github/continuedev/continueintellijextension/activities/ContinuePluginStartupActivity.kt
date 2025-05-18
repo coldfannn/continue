@@ -1,5 +1,5 @@
 package com.github.continuedev.continueintellijextension.activities
-import IntelliJIDE
+
 import com.intellij.openapi.fileEditor.FileEditorManagerListener
 import com.github.continuedev.continueintellijextension.auth.AuthListener
 import com.github.continuedev.continueintellijextension.auth.ContinueAuthService
@@ -153,12 +153,13 @@ class ContinuePluginStartupActivity : StartupActivity, DumbAware {
             val connection = ApplicationManager.getApplication().messageBus.connect()
             connection.subscribe(SettingsListener.TOPIC, object : SettingsListener {
                 override fun settingsUpdated(settings: ContinueExtensionSettings.ContinueState) {
-                    continuePluginService.coreMessenger?.request("config/ideSettingsUpdate", mapOf(
-                        "remoteConfigServerUrl" to settings.remoteConfigServerUrl,
-                        "remoteConfigSyncPeriod" to settings.remoteConfigSyncPeriod,
-                        "userToken" to settings.userToken,
-                        "enableControlServerBeta" to settings.enableContinueTeamsBeta
-                    ), null) { _ -> }
+                    continuePluginService.coreMessenger?.request(
+                        "config/ideSettingsUpdate", mapOf(
+                            "remoteConfigServerUrl" to settings.remoteConfigServerUrl,
+                            "remoteConfigSyncPeriod" to settings.remoteConfigSyncPeriod,
+                            "userToken" to settings.userToken,
+                        ), null
+                    ) { _ -> }
                 }
             })
 
@@ -206,6 +207,7 @@ class ContinuePluginStartupActivity : StartupActivity, DumbAware {
                         continuePluginService.coreMessenger?.request("files/closed", data, null) { _ -> }
                     }
                 }
+
                 override fun fileOpened(source: FileEditorManager, file: VirtualFile) {
                     file.toUriOrNull()?.let { uri ->
                         val data = mapOf("uris" to listOf(uri))
@@ -213,7 +215,6 @@ class ContinuePluginStartupActivity : StartupActivity, DumbAware {
                     }
                 }
             })
-
 
 
             // Listen for theme changes

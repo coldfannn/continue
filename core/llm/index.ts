@@ -40,7 +40,6 @@ import {
   modelSupportsImages,
 } from "./autodetect.js";
 import {
-  CONTEXT_LENGTH_FOR_MODEL,
   DEFAULT_ARGS,
   DEFAULT_CONTEXT_LENGTH,
   DEFAULT_MAX_BATCH_SIZE,
@@ -72,7 +71,11 @@ export class LLMError extends Error {
 }
 
 export function isModelInstaller(provider: any): provider is ModelInstaller {
-  return provider && typeof provider.installModel === "function";
+  return (
+    provider &&
+    typeof provider.installModel === "function" &&
+    typeof provider.isInstallingModel === "function"
+  );
 }
 
 type InteractionStatus = "in_progress" | "success" | "error" | "cancelled";
@@ -127,6 +130,7 @@ export abstract class BaseLLM implements ILLM {
 
   title?: string;
   baseChatSystemMessage?: string;
+  baseAgentSystemMessage?: string;
   contextLength: number;
   maxStopWords?: number | undefined;
   completionOptions: CompletionOptions;
@@ -193,6 +197,7 @@ export abstract class BaseLLM implements ILLM {
 
     this.title = options.title;
     this.uniqueId = options.uniqueId ?? "None";
+    this.baseAgentSystemMessage = options.baseAgentSystemMessage;
     this.baseChatSystemMessage = options.baseChatSystemMessage;
     this.contextLength =
       options.contextLength ?? llmInfo?.contextLength ?? DEFAULT_CONTEXT_LENGTH;
@@ -279,28 +284,6 @@ export abstract class BaseLLM implements ILLM {
 
   listModels(): Promise<string[]> {
     return Promise.resolve([]);
-  }
-
-  private _compileChatMessages(
-    options: CompletionOptions,
-    messages: ChatMessage[],
-  ) {
-    let contextLength = this.contextLength;
-    if (
-      options.model !== this.model &&
-      options.model in CONTEXT_LENGTH_FOR_MODEL
-    ) {
-      contextLength =
-        CONTEXT_LENGTH_FOR_MODEL[options.model] || DEFAULT_CONTEXT_LENGTH;
-    }
-
-    return compileChatMessages({
-      modelName: options.model,
-      msgs: messages,
-      contextLength,
-      maxTokens: options.maxTokens ?? DEFAULT_MAX_TOKENS,
-      supportsImages: this.supportsImages(),
-    });
   }
 
   private _templatePromptLikeMessages(prompt: string): string {
@@ -839,8 +822,8 @@ export abstract class BaseLLM implements ILLM {
     options: LLMFullCompletionOptions = {},
   ) {
     let completion = "";
-    for await (const chunk of this.streamChat(messages, signal, options)) {
-      completion += chunk.content;
+    for await (const message of this.streamChat(messages, signal, options)) {
+      completion += renderChatMessage(message);
     }
     return { role: "assistant" as const, content: completion };
   }
@@ -879,7 +862,14 @@ export abstract class BaseLLM implements ILLM {
 
     completionOptions = this._modifyCompletionOptions(completionOptions);
 
-    const messages = this._compileChatMessages(completionOptions, _messages);
+    const messages = compileChatMessages({
+      modelName: completionOptions.model,
+      msgs: _messages,
+      contextLength: this.contextLength,
+      maxTokens: completionOptions.maxTokens ?? DEFAULT_MAX_TOKENS,
+      supportsImages: this.supportsImages(),
+      tools: options.tools,
+    });
 
     const prompt = this.templateMessages
       ? this.templateMessages(messages)
